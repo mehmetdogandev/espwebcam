@@ -41,6 +41,11 @@ Servo tiltServo;
 int panAngle = 90;   // 0-180 arası
 int tiltAngle = 90;  // 0-180 arası
 
+// Görüntü kalitesi ayarları
+framesize_t currentFrameSize = FRAMESIZE_QVGA;  // Varsayılan: QVGA (320x240)
+int currentJpegQuality = 15;  // Varsayılan kalite
+bool qualityChanged = false;
+
 // AsyncWebServer ve WebSocket
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -403,6 +408,35 @@ const char* html_page = R"rawliteral(
                     <span>Merkeze Al</span>
                 </button>
             </div>
+            
+            <div class="card" style="margin-top: 1.5rem;">
+                <h2 style="margin-bottom: 1rem; font-size: 1.125rem; font-weight: 600;">Görüntü Kalitesi</h2>
+                
+                <div class="servo-item">
+                    <label>
+                        <span>Çözünürlük</span>
+                    </label>
+                    <select id="qualitySize" onchange="changeQuality()" style="width: 100%; padding: 0.625rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); background: var(--card); color: var(--card-fg); font-size: 0.875rem;">
+                        <option value="QQVGA">QQVGA (160x120) - En Hızlı</option>
+                        <option value="QVGA" selected>QVGA (320x240) - Önerilen</option>
+                        <option value="VGA">VGA (640x480) - Yüksek Kalite</option>
+                        <option value="SVGA">SVGA (800x600) - Çok Yüksek</option>
+                    </select>
+                </div>
+                
+                <div class="servo-item">
+                    <label>
+                        <span>JPEG Kalitesi</span>
+                        <span class="value" id="qualityValue">15</span>
+                    </label>
+                    <input type="range" min="10" max="40" value="15" id="qualitySlider" 
+                           oninput='document.getElementById("qualityValue").textContent = this.value; changeQuality()'>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--muted-fg); margin-top: 0.25rem;">
+                        <span>Düşük (Hızlı)</span>
+                        <span>Yüksek (Yavaş)</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -461,14 +495,22 @@ const char* html_page = R"rawliteral(
                         URL.revokeObjectURL(url);
                     };
                 } else {
-                    // Servo pozisyon güncellemesi
-                    const data = event.data.split(',');
-                    if (data[0] === 'Pan') {
-                        document.getElementById('panValue').textContent = data[1] + '°';
-                        document.getElementById('panSlider').value = data[1];
-                    } else if (data[0] === 'Tilt') {
-                        document.getElementById('tiltValue').textContent = data[1] + '°';
-                        document.getElementById('tiltSlider').value = data[1];
+                    // Text mesajları
+                    const message = event.data;
+                    if (message.startsWith('QUALITY_OK:')) {
+                        // Kalite güncellemesi onayı
+                        const parts = message.split(':');
+                        console.log('Kalite güncellendi:', parts[1], parts[2]);
+                    } else if (message.indexOf(',') > 0) {
+                        // Servo pozisyon güncellemesi
+                        const data = message.split(',');
+                        if (data[0] === 'Pan') {
+                            document.getElementById('panValue').textContent = data[1] + '°';
+                            document.getElementById('panSlider').value = data[1];
+                        } else if (data[0] === 'Tilt') {
+                            document.getElementById('tiltValue').textContent = data[1] + '°';
+                            document.getElementById('tiltSlider').value = data[1];
+                        }
                     }
                 }
             };
@@ -501,10 +543,22 @@ const char* html_page = R"rawliteral(
         }
         
         function resetServos() {
-            sendServoCommand('Pan', 90);
-            sendServoCommand('Tilt', 90);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('RESET_SERVOS');
+            }
             document.getElementById('panSlider').value = 90;
             document.getElementById('tiltSlider').value = 90;
+            document.getElementById('panValue').textContent = '90°';
+            document.getElementById('tiltValue').textContent = '90°';
+        }
+        
+        function changeQuality() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const size = document.getElementById('qualitySize').value;
+                const quality = document.getElementById('qualitySlider').value;
+                ws.send(`QUALITY:${size}:${quality}`);
+                console.log(`Kalite değiştiriliyor: ${size}, Quality: ${quality}`);
+            }
         }
         
         function startStream() {
@@ -568,56 +622,126 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
   } else if (type == WS_EVT_DISCONNECT) {
     Serial.printf("WebSocket istemci #%u bağlantısı kesildi\n", client->id());
   } else if (type == WS_EVT_DATA) {
-    // Servo komutu işle
-    String message = String((char*)data);
-    message.trim();
+    AwsFrameInfo *info = (AwsFrameInfo*)arg;
     
-    Serial.printf("WebSocket mesajı: %s\n", message.c_str());
-    
-    // Mesaj formatı: "Pan,120" veya "Tilt,90"
-    int commaIndex = message.indexOf(',');
-    if (commaIndex > 0) {
-      String servoName = message.substring(0, commaIndex);
-      int angle = message.substring(commaIndex + 1).toInt();
-      
-      if (servoName == "Pan" && angle >= 0 && angle <= 180) {
-        panAngle = angle;
-        panServo.write(panAngle);
-        Serial.printf("Pan servo: %d derece\n", panAngle);
-        // Pozisyonu tüm istemcilere bildir
-        ws.textAll("Pan," + String(panAngle));
-      } else if (servoName == "Tilt" && angle >= 0 && angle <= 180) {
-        tiltAngle = angle;
-        tiltServo.write(tiltAngle);
-        Serial.printf("Tilt servo: %d derece\n", tiltAngle);
-        // Pozisyonu tüm istemcilere bildir
-        ws.textAll("Tilt," + String(tiltAngle));
+    // Sadece TEXT mesajlarını işle (binary görüntü verilerini yok say)
+    if (info->opcode == WS_TEXT) {
+      // Mesajı güvenli şekilde string'e çevir
+      String message = "";
+      for (size_t i = 0; i < len; i++) {
+        if (data[i] >= 32 && data[i] < 127) {  // Sadece yazdırılabilir karakterler
+          message += (char)data[i];
+        }
       }
-    } else if (message == "START_STREAM") {
-      Serial.println("Stream başlatıldı");
-    } else if (message == "STOP_STREAM") {
-      Serial.println("Stream durduruldu");
+      message.trim();
+      
+      if (message.length() > 0 && message.length() < 50) {  // Makul uzunluk kontrolü
+        Serial.printf("WebSocket TEXT mesajı: %s\n", message.c_str());
+        
+        // Kalite değiştirme komutu: "QUALITY:QVGA:15"
+        if (message.startsWith("QUALITY:")) {
+          String qualityStr = message.substring(8);
+          int colonIndex = qualityStr.indexOf(':');
+          if (colonIndex > 0) {
+            String sizeStr = qualityStr.substring(0, colonIndex);
+            int quality = qualityStr.substring(colonIndex + 1).toInt();
+            
+            if (sizeStr == "QQVGA") {
+              currentFrameSize = FRAMESIZE_QQVGA;
+            } else if (sizeStr == "QVGA") {
+              currentFrameSize = FRAMESIZE_QVGA;
+            } else if (sizeStr == "VGA") {
+              currentFrameSize = FRAMESIZE_VGA;
+            } else if (sizeStr == "SVGA") {
+              currentFrameSize = FRAMESIZE_SVGA;
+            }
+            
+            if (quality >= 10 && quality <= 63) {
+              currentJpegQuality = quality;
+            }
+            
+            qualityChanged = true;
+            Serial.printf("Kalite değiştirildi: %s, Quality: %d\n", sizeStr.c_str(), currentJpegQuality);
+            ws.textAll("QUALITY_OK:" + sizeStr + ":" + String(currentJpegQuality));
+          }
+        }
+        // Servo komutu: "Pan,120" veya "Tilt,90"
+        else if (message.indexOf(',') > 0) {
+          int commaIndex = message.indexOf(',');
+          String servoName = message.substring(0, commaIndex);
+          String angleStr = message.substring(commaIndex + 1);
+          
+          // Sadece sayısal karakterleri al
+          String cleanAngle = "";
+          for (int i = 0; i < angleStr.length(); i++) {
+            if (angleStr[i] >= '0' && angleStr[i] <= '9') {
+              cleanAngle += angleStr[i];
+            }
+          }
+          
+          if (cleanAngle.length() > 0) {
+            int angle = cleanAngle.toInt();
+            
+            if (servoName == "Pan" && angle >= 0 && angle <= 180) {
+              panAngle = angle;
+              panServo.write(panAngle);
+              Serial.printf("Pan servo: %d derece\n", panAngle);
+              ws.textAll("Pan," + String(panAngle));
+            } else if (servoName == "Tilt" && angle >= 0 && angle <= 180) {
+              tiltAngle = angle;
+              tiltServo.write(tiltAngle);
+              Serial.printf("Tilt servo: %d derece\n", tiltAngle);
+              ws.textAll("Tilt," + String(tiltAngle));
+            }
+          }
+        }
+        // Diğer komutlar
+        else if (message == "START_STREAM") {
+          Serial.println("Stream başlatıldı");
+        } else if (message == "STOP_STREAM") {
+          Serial.println("Stream durduruldu");
+        } else if (message == "RESET_SERVOS") {
+          panAngle = 90;
+          tiltAngle = 90;
+          panServo.write(panAngle);
+          tiltServo.write(tiltAngle);
+          ws.textAll("Pan,90");
+          ws.textAll("Tilt,90");
+          Serial.println("Servolar merkeze alındı");
+        }
+      }
     }
+    // Binary mesajları (görüntü verileri) yok say - sadece gönderiyoruz, almıyoruz
   }
 }
 
 // Görüntü akışı görev fonksiyonu
 void streamTask(void *pvParameters) {
   while (true) {
+    // Kalite değişikliği kontrolü
+    if (qualityChanged) {
+      qualityChanged = false;
+      // Kamera ayarlarını güncelle
+      sensor_t *s = esp_camera_sensor_get();
+      if (s) {
+        s->set_framesize(s, currentFrameSize);
+        s->set_quality(s, currentJpegQuality);
+        Serial.printf("Kamera kalitesi güncellendi: Size=%d, Quality=%d\n", currentFrameSize, currentJpegQuality);
+        delay(500);  // Ayarların uygulanması için bekle
+      }
+    }
+    
     // Tüm WebSocket istemcilerine görüntü gönder
     if (ws.count() > 0) {
       camera_fb_t * fb = esp_camera_fb_get();
       if (fb) {
-        // Frame boyutunu kontrol et - çok büyükse atla
-        if (fb->len < 10000) {  // 10KB'dan küçük frame'ler gönder
-          // Her istemciye görüntü gönder
-          ws.binaryAll(fb->buf, fb->len);
-        }
+        // Tüm frame'leri gönder (boyut kontrolü kaldırıldı)
+        ws.binaryAll(fb->buf, fb->len);
         esp_camera_fb_return(fb);
       }
     }
-    // 100ms = ~10 FPS - Daha stabil ve hızlı
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    // 66ms = ~15 FPS - İyi hız/kalite dengesi
+    vTaskDelay(66 / portTICK_PERIOD_MS);
   }
 }
 
@@ -649,9 +773,9 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // Hız optimizasyonu ayarları - Maksimum hız için
-  config.frame_size = FRAMESIZE_QQVGA;  // 160x120 - En hızlı, en küçük dosya
-  config.jpeg_quality = 30;  // Yüksek sayı = daha küçük dosya = DAHA HIZLI
+  // Hız optimizasyonu ayarları - Varsayılan kalite
+  config.frame_size = currentFrameSize;  // QVGA (320x240) - İyi kalite/hız dengesi
+  config.jpeg_quality = currentJpegQuality;  // 15 - İyi kalite
   config.fb_count = 1;  // Tek buffer - daha hızlı işleme
   
   // Kamera başlatma
