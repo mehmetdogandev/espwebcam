@@ -274,18 +274,19 @@ void setup() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  // Hız optimizasyonu için XCLK frekansını artır
+  config.xclk_freq_hz = 20000000;  // 20MHz - maksimum hız
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // Kalite ayarları (daha yüksek kalite için daha fazla RAM gerekir)
+  // Profesyonel hız optimizasyonu ayarları
   // FRAMESIZE_QQVGA (160x120) - En hızlı, en az RAM
-  // FRAMESIZE_QVGA (320x240) - Hızlı, az RAM
+  // FRAMESIZE_QVGA (320x240) - Hızlı, az RAM - ÖNERİLEN (hız/kalite dengesi)
   // FRAMESIZE_VGA (640x480) - Orta hız, orta RAM
   // FRAMESIZE_SVGA (800x600) - Yavaş, çok RAM
   // FRAMESIZE_XGA (1024x768) - Çok yavaş, çok RAM
-  config.frame_size = FRAMESIZE_VGA;  // 640x480 - İyi kalite/hız dengesi
-  config.jpeg_quality = 12;  // 0-63, düşük sayı = yüksek kalite
-  config.fb_count = 2;  // Frame buffer sayısı
+  config.frame_size = FRAMESIZE_QVGA;  // 320x240 - Hız için optimize edilmiş
+  config.jpeg_quality = 18;  // 0-63, yüksek sayı = düşük kalite ama daha küçük dosya = DAHA HIZLI
+  config.fb_count = 1;  // Tek buffer - daha hızlı işleme, daha az RAM
   
   // Kamera başlatma
   esp_err_t err = esp_camera_init(&config);
@@ -369,56 +370,55 @@ void loop() {
         client.println();
         
         unsigned long lastFrame = 0;
-        const unsigned long frameInterval = 100; // 100ms = ~10 FPS (ayarlanabilir)
+        const unsigned long frameInterval = 50; // 50ms = ~20 FPS - Profesyonel hız
         
-        // Sürekli frame gönder
+        // Sürekli frame gönder - Optimize edilmiş döngü
         while (client.connected()) {
           unsigned long now = millis();
           
-          // Frame rate kontrolü
+          // Frame rate kontrolü - minimum interval
           if (now - lastFrame >= frameInterval) {
             lastFrame = now;
             
-            // Yeni frame al (eski frame'i döndürmeden önce yeni al)
+            // Yeni frame al - eski frame'i hemen serbest bırak
             camera_fb_t * fb = esp_camera_fb_get();
             
             if (!fb) {
               Serial.println("Kamera frame alınamadı");
-              delay(100);
+              delay(5);  // Daha kısa delay
               continue;
             }
             
-            // Multipart boundary ve frame gönder
-            // Her frame için cache kontrolü - Tarayıcının frame'leri tutmaması için
-            client.println("--frame");
-            client.println("Content-Type: image/jpeg");
-            client.println("Content-Length: " + String(fb->len));
-            client.println("Cache-Control: no-cache, no-store, must-revalidate");
-            client.println("Pragma: no-cache");
-            client.println();
+            // Multipart boundary ve frame gönder - optimize edilmiş
+            client.print("--frame\r\n");
+            client.print("Content-Type: image/jpeg\r\n");
+            client.print("Content-Length: ");
+            client.print(fb->len);
+            client.print("\r\n\r\n");
             
-            // Frame verisini gönder
+            // Frame verisini direkt gönder - buffer kullanmadan
             size_t sent = client.write(fb->buf, fb->len);
             
             if (sent != fb->len) {
-              Serial.println("Frame gönderimi tamamlanamadı, bağlantı kesiliyor");
+              Serial.println("Frame gönderimi tamamlanamadı");
               esp_camera_fb_return(fb);
               break;
             }
             
-            client.println();
+            client.print("\r\n");
             
-            // Frame'i serbest bırak
+            // Frame'i hemen serbest bırak - memory yönetimi
             esp_camera_fb_return(fb);
             
-            // Kısa bir gecikme (CPU'yu rahatlatmak için)
-            delay(10);
-          } else {
+            // Minimum delay - sadece CPU'ya nefes vermek için
             delay(1);
+          } else {
+            // CPU'yu rahatlatmak için yield
+            yield();
           }
           
-          // İstemci bağlantısını kontrol et
-          if (!client.available() && !client.connected()) {
+          // İstemci bağlantısını hızlı kontrol et
+          if (!client.connected()) {
             break;
           }
         }
