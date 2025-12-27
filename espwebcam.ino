@@ -152,57 +152,99 @@ const char* html_page = R"rawliteral(
         <p class="subtitle">Gerçek zamanlı kamera akışı</p>
         
         <div class="video-container">
-            <img id="stream" src="/stream" alt="Canlı Görüntü">
+            <img id="stream" src="" alt="Canlı Görüntü">
         </div>
         
         <div class="controls">
+            <button onclick="startStream()">▶️ Başlat</button>
+            <button onclick="stopStream()">⏸️ Durdur</button>
             <button onclick="window.location.reload()">🔄 Yenile</button>
-            <button onclick="toggleStream()">⏸️ Duraklat / ▶️ Devam</button>
         </div>
         
         <div class="status" id="status">
-            <strong>Durum:</strong> <span id="statusText">Bağlanıyor...</span>
+            <strong>Durum:</strong> <span id="statusText">Başlatılıyor...</span>
         </div>
     </div>
     
     <script>
-        let streamRunning = true;
+        let streamRunning = false;
         const img = document.getElementById('stream');
         const statusText = document.getElementById('statusText');
         const statusDiv = document.getElementById('status');
+        let memoryCleanupInterval = null;
         
-        img.onload = function() {
-            statusText.textContent = 'Bağlı - Canlı yayın aktif';
-            statusDiv.className = 'status online';
-        };
-        
-        img.onerror = function() {
-            statusText.textContent = 'Bağlantı hatası - Yeniden deneniyor...';
-            statusDiv.className = 'status';
-            setTimeout(() => {
-                if(streamRunning) {
-                    img.src = '/stream?' + new Date().getTime();
+        function startStream() {
+            if (!streamRunning) {
+                streamRunning = true;
+                // Cache bypass için timestamp ekle (ilk başlatmada)
+                img.src = '/stream?t=' + Date.now();
+                statusText.textContent = 'Canlı yayın aktif - Bağlanıyor...';
+                statusDiv.className = 'status';
+                
+                // Memory temizleme - Her 30 saniyede bir img cache'ini temizle
+                if (memoryCleanupInterval) {
+                    clearInterval(memoryCleanupInterval);
                 }
-            }, 1000);
-        };
-        
-        function toggleStream() {
-            streamRunning = !streamRunning;
-            if(streamRunning) {
-                img.src = '/stream?' + new Date().getTime();
-                statusText.textContent = 'Yayın devam ediyor';
-            } else {
-                img.src = '';
-                statusText.textContent = 'Yayın duraklatıldı';
+                memoryCleanupInterval = setInterval(() => {
+                    if (streamRunning && img.complete) {
+                        // Tarayıcının memory'sini rahatlatmak için
+                        // Image decode cache'ini temizlemeye çalış
+                        try {
+                            // Chrome/Edge için
+                            if (window.chrome && window.chrome.runtime) {
+                                img.decode().catch(() => {});
+                            }
+                        } catch(e) {}
+                    }
+                }, 30000); // 30 saniyede bir
             }
         }
         
-        // Otomatik yenileme (her 30 saniyede bir)
-        setInterval(() => {
-            if(streamRunning) {
-                img.src = '/stream?' + new Date().getTime();
+        function stopStream() {
+            streamRunning = false;
+            img.src = '';
+            statusText.textContent = 'Yayın durduruldu';
+            statusDiv.className = 'status';
+            
+            // Memory cleanup interval'ı temizle
+            if (memoryCleanupInterval) {
+                clearInterval(memoryCleanupInterval);
+                memoryCleanupInterval = null;
             }
-        }, 30000);
+            
+            // Image element'ini tamamen temizle
+            img.removeAttribute('src');
+            img.src = '';
+        }
+        
+        img.onload = function() {
+            if (streamRunning) {
+                statusText.textContent = 'Bağlı - Canlı yayın aktif ✓';
+                statusDiv.className = 'status online';
+            }
+        };
+        
+        img.onerror = function() {
+            if (streamRunning) {
+                statusText.textContent = 'Bağlantı hatası - Yeniden deneniyor...';
+                statusDiv.className = 'status';
+                setTimeout(() => {
+                    if (streamRunning) {
+                        img.src = '/stream?t=' + Date.now();
+                    }
+                }, 2000);
+            }
+        };
+        
+        // Sayfa kapatılırken temizlik yap
+        window.addEventListener('beforeunload', function() {
+            stopStream();
+        });
+        
+        // Sayfa yüklendiğinde otomatik başlat
+        window.onload = function() {
+            startStream();
+        };
     </script>
 </body>
 </html>
@@ -288,60 +330,121 @@ void loop() {
   
   if (client) {
     Serial.println("Yeni istemci bağlandı");
-    String currentLine = "";
+    String request = "";
     unsigned long timeout = millis() + 5000;  // 5 saniye timeout
     
+    // HTTP isteğini oku
     while (client.connected() && millis() < timeout) {
       if (client.available()) {
-        char c = client.read();
-        Serial.write(c);
+        String line = client.readStringUntil('\n');
+        line.trim();
         
-        if (c == '\n') {
-          if (currentLine.length() == 0) {
-            // HTTP isteği tamamlandı, yanıt gönder
-            String request = client.readStringUntil('\r');
-            client.flush();
-            
-            if (request.indexOf("/stream") >= 0) {
-              // Canlı görüntü akışı
-              camera_fb_t * fb = esp_camera_fb_get();
-              if (!fb) {
-                Serial.println("Kamera görüntüsü alınamadı");
-                client.stop();
-                continue;
-              }
-              
-              client.println("HTTP/1.1 200 OK");
-              client.println("Content-Type: image/jpeg");
-              client.println("Content-Length: " + String(fb->len));
-              client.println("Connection: close");
-              client.println("Cache-Control: no-cache, no-store, must-revalidate");
-              client.println("Pragma: no-cache");
-              client.println("Expires: 0");
-              client.println();
-              client.write(fb->buf, fb->len);
-              
-              esp_camera_fb_return(fb);
-            } else {
-              // Ana sayfa (HTML)
-              client.println("HTTP/1.1 200 OK");
-              client.println("Content-type:text/html");
-              client.println("Connection: close");
-              client.println();
-              client.println(html_page);
-            }
-            
-            break;
-          } else {
-            currentLine = "";
-          }
-        } else if (c != '\r') {
-          currentLine += c;
+        if (line.length() == 0) {
+          // Boş satır = HTTP header'ları bitti, request hazır
+          break;
+        } else if (request.length() == 0) {
+          // İlk satır = HTTP request satırı (GET / HTTP/1.1)
+          request = line;
+          Serial.println("İstek: " + request);
         }
       }
     }
     
+    // HTTP yanıtını gönder
+    if (request.length() > 0) {
+      if (request.indexOf("GET /stream") >= 0) {
+        // MJPEG Stream - Canlı görüntü akışı
+        Serial.println("MJPEG stream başlatılıyor...");
+        
+        // MJPEG stream header - Cache kontrolü ile tarayıcı belleğini koruma
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+        client.println("Connection: keep-alive");
+        // Güçlü cache kontrolü - Tarayıcının hiçbir şeyi cache'lememesi için
+        client.println("Cache-Control: no-cache, no-store, must-revalidate, max-age=0");
+        client.println("Pragma: no-cache");
+        client.println("Expires: 0");
+        client.println("X-Accel-Buffering: no"); // Nginx buffer kontrolü
+        client.println("X-Content-Type-Options: nosniff");
+        client.println();
+        
+        unsigned long lastFrame = 0;
+        const unsigned long frameInterval = 100; // 100ms = ~10 FPS (ayarlanabilir)
+        
+        // Sürekli frame gönder
+        while (client.connected()) {
+          unsigned long now = millis();
+          
+          // Frame rate kontrolü
+          if (now - lastFrame >= frameInterval) {
+            lastFrame = now;
+            
+            // Yeni frame al (eski frame'i döndürmeden önce yeni al)
+            camera_fb_t * fb = esp_camera_fb_get();
+            
+            if (!fb) {
+              Serial.println("Kamera frame alınamadı");
+              delay(100);
+              continue;
+            }
+            
+            // Multipart boundary ve frame gönder
+            // Her frame için cache kontrolü - Tarayıcının frame'leri tutmaması için
+            client.println("--frame");
+            client.println("Content-Type: image/jpeg");
+            client.println("Content-Length: " + String(fb->len));
+            client.println("Cache-Control: no-cache, no-store, must-revalidate");
+            client.println("Pragma: no-cache");
+            client.println();
+            
+            // Frame verisini gönder
+            size_t sent = client.write(fb->buf, fb->len);
+            
+            if (sent != fb->len) {
+              Serial.println("Frame gönderimi tamamlanamadı, bağlantı kesiliyor");
+              esp_camera_fb_return(fb);
+              break;
+            }
+            
+            client.println();
+            
+            // Frame'i serbest bırak
+            esp_camera_fb_return(fb);
+            
+            // Kısa bir gecikme (CPU'yu rahatlatmak için)
+            delay(10);
+          } else {
+            delay(1);
+          }
+          
+          // İstemci bağlantısını kontrol et
+          if (!client.available() && !client.connected()) {
+            break;
+          }
+        }
+        
+        Serial.println("MJPEG stream sonlandırıldı");
+      } else if (request.indexOf("GET /favicon.ico") >= 0) {
+        // Favicon isteği - 404 döndür
+        client.println("HTTP/1.1 404 Not Found");
+        client.println("Connection: close");
+        client.println();
+        Serial.println("Favicon isteği - 404");
+      } else {
+        // Ana sayfa (HTML)
+        Serial.println("Ana sayfa gönderiliyor...");
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-type:text/html");
+        client.println("Connection: close");
+        client.println();
+        client.print(html_page);
+        Serial.println("Ana sayfa gönderildi");
+      }
+    }
+    
+    // Kalan verileri temizle ve bağlantıyı kapat
+    delay(10);
     client.stop();
-    Serial.println("İstemci bağlantısı kesildi");
+    Serial.println("İstemci bağlantısı kesildi\n");
   }
 }
