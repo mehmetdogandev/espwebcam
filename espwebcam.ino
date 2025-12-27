@@ -608,13 +608,16 @@ void streamTask(void *pvParameters) {
     if (ws.count() > 0) {
       camera_fb_t * fb = esp_camera_fb_get();
       if (fb) {
-        // Her istemciye görüntü gönder
-        ws.binaryAll(fb->buf, fb->len);
+        // Frame boyutunu kontrol et - çok büyükse atla
+        if (fb->len < 10000) {  // 10KB'dan küçük frame'ler gönder
+          // Her istemciye görüntü gönder
+          ws.binaryAll(fb->buf, fb->len);
+        }
         esp_camera_fb_return(fb);
       }
     }
-    // 33ms = ~30 FPS
-    vTaskDelay(33 / portTICK_PERIOD_MS);
+    // 100ms = ~10 FPS - Daha stabil ve hızlı
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -646,10 +649,10 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // Hız optimizasyonu ayarları
-  config.frame_size = FRAMESIZE_QVGA;  // 320x240 - Hız için optimize
-  config.jpeg_quality = 20;  // Daha küçük dosya = daha hızlı
-  config.fb_count = 1;  // Tek buffer - daha hızlı
+  // Hız optimizasyonu ayarları - Maksimum hız için
+  config.frame_size = FRAMESIZE_QQVGA;  // 160x120 - En hızlı, en küçük dosya
+  config.jpeg_quality = 30;  // Yüksek sayı = daha küçük dosya = DAHA HIZLI
+  config.fb_count = 1;  // Tek buffer - daha hızlı işleme
   
   // Kamera başlatma
   esp_err_t err = esp_camera_init(&config);
