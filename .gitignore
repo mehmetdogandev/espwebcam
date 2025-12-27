@@ -1,0 +1,13 @@
+# Ortam değişkenleri dosyası (hassas bilgiler içerir)
+env.h
+
+# Arduino IDE dosyaları
+*.hex
+*.elf
+*.bin
+build/
+.vscode/
+
+# Sistem dosyaları
+.DS_Store
+Thumbs.db
