@@ -9,6 +9,8 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ESP32Servo.h>
+#include <iostream>
+#include <sstream>
 #include "env.h"
 
 // Kamera Pin Tanımlamaları (AI-Thinker ESP32-CAM)
@@ -33,7 +35,13 @@
 #define PAN_PIN  14   // Pan (Yatay) servo
 #define TILT_PIN 15   // Tilt (Dikey) servo
 
+// Dummy Servo Pinleri (Timer çakışmasını önlemek için - GitHub projesinden)
+#define DUMMY_SERVO1_PIN 12
+#define DUMMY_SERVO2_PIN 13
+
 // Servo nesneleri (ESP32Servo kütüphanesi Servo class'ını kullanır)
+Servo dummyServo1;
+Servo dummyServo2;
 Servo panServo;
 Servo tiltServo;
 
@@ -46,9 +54,11 @@ framesize_t currentFrameSize = FRAMESIZE_QVGA;  // Varsayılan: QVGA (320x240)
 int currentJpegQuality = 15;  // Varsayılan kalite
 bool qualityChanged = false;
 
-// AsyncWebServer ve WebSocket
+// AsyncWebServer ve WebSocket - İki ayrı WebSocket (GitHub projesinden)
 AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
+AsyncWebSocket wsCamera("/Camera");      // Sadece görüntü için
+AsyncWebSocket wsServoInput("/ServoInput");  // Sadece servo komutları için
+uint32_t cameraClientId = 0;  // Aktif kamera istemci ID'si
 
 // WiFi bağlantı durumu
 unsigned long lastWiFiCheck = 0;
@@ -463,76 +473,80 @@ const char* html_page = R"rawliteral(
             updateThemeUI(isDark);
         }
         
-        // WebSocket Management
-        let ws = null;
-        let streamRunning = false;
+        // WebSocket Management - İki ayrı WebSocket (GitHub projesinden)
+        let websocketCamera = null;
+        let websocketServoInput = null;
         const img = document.getElementById('stream');
         const statusText = document.getElementById('statusText');
         const statusDiv = document.getElementById('status');
         
-        function connectWebSocket() {
+        function initCameraWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            const wsUrl = `${protocol}//${window.location.hostname}/Camera`;
             
-            ws = new WebSocket(wsUrl);
+            websocketCamera = new WebSocket(wsUrl);
+            websocketCamera.binaryType = 'blob';
             
-            ws.onopen = function() {
-                console.log('WebSocket bağlandı');
-                statusText.textContent = 'WebSocket bağlı';
+            websocketCamera.onopen = function(event) {
+                console.log('Camera WebSocket bağlandı');
+                statusText.textContent = 'Canlı yayın aktif ✓';
                 statusDiv.className = 'status online';
-                if (streamRunning) {
-                    startStream();
-                }
             };
             
-            ws.onmessage = function(event) {
-                if (event.data instanceof Blob) {
-                    // Görüntü verisi
-                    const url = URL.createObjectURL(event.data);
-                    img.src = url;
-                    // Eski URL'i temizle
-                    img.onload = function() {
-                        URL.revokeObjectURL(url);
-                    };
-                } else {
-                    // Text mesajları
-                    const message = event.data;
-                    if (message.startsWith('QUALITY_OK:')) {
-                        // Kalite güncellemesi onayı
-                        const parts = message.split(':');
-                        console.log('Kalite güncellendi:', parts[1], parts[2]);
-                    } else if (message.indexOf(',') > 0) {
-                        // Servo pozisyon güncellemesi
-                        const data = message.split(',');
-                        if (data[0] === 'Pan') {
-                            document.getElementById('panValue').textContent = data[1] + '°';
-                            document.getElementById('panSlider').value = data[1];
-                        } else if (data[0] === 'Tilt') {
-                            document.getElementById('tiltValue').textContent = data[1] + '°';
-                            document.getElementById('tiltSlider').value = data[1];
-                        }
-                    }
-                }
-            };
-            
-            ws.onerror = function(error) {
-                console.error('WebSocket hatası:', error);
-                statusText.textContent = 'WebSocket hatası';
-                statusDiv.className = 'status';
-            };
-            
-            ws.onclose = function() {
-                console.log('WebSocket bağlantısı kapandı');
+            websocketCamera.onclose = function(event) {
+                console.log('Camera WebSocket kapandı');
                 statusText.textContent = 'Yeniden bağlanılıyor...';
                 statusDiv.className = 'status';
-                // 3 saniye sonra yeniden bağlan
-                setTimeout(connectWebSocket, 3000);
+                setTimeout(initCameraWebSocket, 2000);
+            };
+            
+            websocketCamera.onmessage = function(event) {
+                // Sadece görüntü verisi (Blob)
+                const url = URL.createObjectURL(event.data);
+                img.src = url;
+                // Eski URL'i temizle
+                img.onload = function() {
+                    if (img.src !== url && img.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(img.src);
+                    }
+                };
             };
         }
         
+        function initServoInputWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.hostname}/ServoInput`;
+            
+            websocketServoInput = new WebSocket(wsUrl);
+            
+            websocketServoInput.onopen = function(event) {
+                console.log('ServoInput WebSocket bağlandı');
+                // Başlangıç pozisyonlarını gönder
+                const panButton = document.getElementById('panSlider');
+                sendServoCommand('Pan', panButton.value);
+                const tiltButton = document.getElementById('tiltSlider');
+                sendServoCommand('Tilt', tiltButton.value);
+            };
+            
+            websocketServoInput.onclose = function(event) {
+                console.log('ServoInput WebSocket kapandı');
+                setTimeout(initServoInputWebSocket, 2000);
+            };
+            
+            websocketServoInput.onmessage = function(event) {
+                // Servo pozisyon güncellemeleri (gerekirse)
+            };
+        }
+        
+        function initWebSocket() {
+            initCameraWebSocket();
+            initServoInputWebSocket();
+        }
+        
         function sendServoCommand(servo, value) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(`${servo},${value}`);
+            if (websocketServoInput && websocketServoInput.readyState === WebSocket.OPEN) {
+                const data = servo + ',' + value;
+                websocketServoInput.send(data);
                 // UI güncellemesi
                 if (servo === 'Pan') {
                     document.getElementById('panValue').textContent = value + '°';
@@ -543,44 +557,35 @@ const char* html_page = R"rawliteral(
         }
         
         function resetServos() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('RESET_SERVOS');
-            }
+            sendServoCommand('Pan', 90);
+            sendServoCommand('Tilt', 90);
             document.getElementById('panSlider').value = 90;
             document.getElementById('tiltSlider').value = 90;
-            document.getElementById('panValue').textContent = '90°';
-            document.getElementById('tiltValue').textContent = '90°';
         }
         
         function changeQuality() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
+            if (websocketServoInput && websocketServoInput.readyState === WebSocket.OPEN) {
                 const size = document.getElementById('qualitySize').value;
                 const quality = document.getElementById('qualitySlider').value;
-                ws.send(`QUALITY:${size}:${quality}`);
+                websocketServoInput.send(`QUALITY,${size},${quality}`);
                 console.log(`Kalite değiştiriliyor: ${size}, Quality: ${quality}`);
             }
         }
         
         function startStream() {
-            streamRunning = true;
-            statusText.textContent = 'Akış başlatıldı';
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('START_STREAM');
-            }
+            statusText.textContent = 'Canlı yayın aktif ✓';
+            statusDiv.className = 'status online';
         }
         
         function stopStream() {
-            streamRunning = false;
             img.src = '';
-            statusText.textContent = 'Akış durduruldu';
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('STOP_STREAM');
-            }
+            statusText.textContent = 'Yayın durduruldu';
+            statusDiv.className = 'status';
         }
         
         // Initialize
         initTheme();
-        connectWebSocket();
+        initWebSocket();
         window.onload = function() {
             startStream();
         };
@@ -614,134 +619,147 @@ void checkWiFiConnection() {
   }
 }
 
-// WebSocket event handler
-void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
+// WebSocket event handler - Servo Input (GitHub projesinden)
+void onServoInputWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
                      AwsEventType type, void *arg, uint8_t *data, size_t len) {
-  if (type == WS_EVT_CONNECT) {
-    Serial.printf("WebSocket istemci #%u bağlandı: %s\n", client->id(), client->remoteIP().toString().c_str());
-  } else if (type == WS_EVT_DISCONNECT) {
-    Serial.printf("WebSocket istemci #%u bağlantısı kesildi\n", client->id());
-  } else if (type == WS_EVT_DATA) {
-    AwsFrameInfo *info = (AwsFrameInfo*)arg;
-    
-    // Sadece TEXT mesajlarını işle (binary görüntü verilerini yok say)
-    if (info->opcode == WS_TEXT) {
-      // Mesajı güvenli şekilde string'e çevir
-      String message = "";
-      for (size_t i = 0; i < len; i++) {
-        if (data[i] >= 32 && data[i] < 127) {  // Sadece yazdırılabilir karakterler
-          message += (char)data[i];
-        }
-      }
-      message.trim();
-      
-      if (message.length() > 0 && message.length() < 50) {  // Makul uzunluk kontrolü
-        Serial.printf("WebSocket TEXT mesajı: %s\n", message.c_str());
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("ServoInput WebSocket istemci #%u bağlandı: %s\n", client->id(), client->remoteIP().toString().c_str());
+      // Başlangıç pozisyonlarını gönder
+      client->text("Pan," + String(panAngle));
+      client->text("Tilt," + String(tiltAngle));
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("ServoInput WebSocket istemci #%u bağlantısı kesildi\n", client->id());
+      // Bağlantı kesildiğinde servoları merkeze al
+      panServo.write(90);
+      tiltServo.write(90);
+      panAngle = 90;
+      tiltAngle = 90;
+      break;
+    case WS_EVT_DATA: {
+      AwsFrameInfo *info = (AwsFrameInfo*)arg;
+      // GitHub projesinden: Sadece tam ve TEXT mesajlarını işle
+      if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+        std::string myData = "";
+        myData.assign((char *)data, len);
+        Serial.printf("ServoInput: Key,Value = [%s]\n", myData.c_str());
         
-        // Kalite değiştirme komutu: "QUALITY:QVGA:15"
-        if (message.startsWith("QUALITY:")) {
-          String qualityStr = message.substring(8);
-          int colonIndex = qualityStr.indexOf(':');
-          if (colonIndex > 0) {
-            String sizeStr = qualityStr.substring(0, colonIndex);
-            int quality = qualityStr.substring(colonIndex + 1).toInt();
-            
-            if (sizeStr == "QQVGA") {
-              currentFrameSize = FRAMESIZE_QQVGA;
-            } else if (sizeStr == "QVGA") {
-              currentFrameSize = FRAMESIZE_QVGA;
-            } else if (sizeStr == "VGA") {
-              currentFrameSize = FRAMESIZE_VGA;
-            } else if (sizeStr == "SVGA") {
-              currentFrameSize = FRAMESIZE_SVGA;
-            }
-            
-            if (quality >= 10 && quality <= 63) {
-              currentJpegQuality = quality;
-            }
-            
-            qualityChanged = true;
-            Serial.printf("Kalite değiştirildi: %s, Quality: %d\n", sizeStr.c_str(), currentJpegQuality);
-            ws.textAll("QUALITY_OK:" + sizeStr + ":" + String(currentJpegQuality));
-          }
-        }
-        // Servo komutu: "Pan,120" veya "Tilt,90"
-        else if (message.indexOf(',') > 0) {
-          int commaIndex = message.indexOf(',');
-          String servoName = message.substring(0, commaIndex);
-          String angleStr = message.substring(commaIndex + 1);
+        std::istringstream ss(myData);
+        std::string key, value;
+        std::getline(ss, key, ',');
+        std::getline(ss, value, ',');
+        
+        if (value != "") {
+          int valueInt = atoi(value.c_str());
           
-          // Sadece sayısal karakterleri al
-          String cleanAngle = "";
-          for (int i = 0; i < angleStr.length(); i++) {
-            if (angleStr[i] >= '0' && angleStr[i] <= '9') {
-              cleanAngle += angleStr[i];
+          if (key == "Pan" && valueInt >= 0 && valueInt <= 180) {
+            panAngle = valueInt;
+            panServo.write(panAngle);
+            Serial.printf("Pan servo: %d derece\n", panAngle);
+          } else if (key == "Tilt" && valueInt >= 0 && valueInt <= 180) {
+            tiltAngle = valueInt;
+            tiltServo.write(tiltAngle);
+            Serial.printf("Tilt servo: %d derece\n", tiltAngle);
+          } else if (key == "QUALITY") {
+            // Kalite komutu: "QUALITY,VGA,15"
+            std::string sizeStr, qualityStr;
+            if (std::getline(ss, sizeStr, ',') && std::getline(ss, qualityStr, ',')) {
+              if (sizeStr == "QQVGA") {
+                currentFrameSize = FRAMESIZE_QQVGA;
+              } else if (sizeStr == "QVGA") {
+                currentFrameSize = FRAMESIZE_QVGA;
+              } else if (sizeStr == "VGA") {
+                currentFrameSize = FRAMESIZE_VGA;
+              } else if (sizeStr == "SVGA") {
+                currentFrameSize = FRAMESIZE_SVGA;
+              }
+              
+              int quality = atoi(qualityStr.c_str());
+              if (quality >= 10 && quality <= 63) {
+                currentJpegQuality = quality;
+              }
+              
+              qualityChanged = true;
+              Serial.printf("Kalite değiştirildi: %s, Quality: %d\n", sizeStr.c_str(), currentJpegQuality);
             }
+          } else if (key == "RESET_SERVOS") {
+            panAngle = 90;
+            tiltAngle = 90;
+            panServo.write(panAngle);
+            tiltServo.write(tiltAngle);
+            Serial.println("Servolar merkeze alındı");
           }
-          
-          if (cleanAngle.length() > 0) {
-            int angle = cleanAngle.toInt();
-            
-            if (servoName == "Pan" && angle >= 0 && angle <= 180) {
-              panAngle = angle;
-              panServo.write(panAngle);
-              Serial.printf("Pan servo: %d derece\n", panAngle);
-              ws.textAll("Pan," + String(panAngle));
-            } else if (servoName == "Tilt" && angle >= 0 && angle <= 180) {
-              tiltAngle = angle;
-              tiltServo.write(tiltAngle);
-              Serial.printf("Tilt servo: %d derece\n", tiltAngle);
-              ws.textAll("Tilt," + String(tiltAngle));
-            }
-          }
-        }
-        // Diğer komutlar
-        else if (message == "START_STREAM") {
-          Serial.println("Stream başlatıldı");
-        } else if (message == "STOP_STREAM") {
-          Serial.println("Stream durduruldu");
-        } else if (message == "RESET_SERVOS") {
-          panAngle = 90;
-          tiltAngle = 90;
-          panServo.write(panAngle);
-          tiltServo.write(tiltAngle);
-          ws.textAll("Pan,90");
-          ws.textAll("Tilt,90");
-          Serial.println("Servolar merkeze alındı");
         }
       }
+      break;
     }
-    // Binary mesajları (görüntü verileri) yok say - sadece gönderiyoruz, almıyoruz
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
+    default:
+      break;
   }
 }
 
-// Görüntü akışı görev fonksiyonu
-void streamTask(void *pvParameters) {
+// WebSocket event handler - Camera (GitHub projesinden)
+void onCameraWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
+                     AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("Camera WebSocket istemci #%u bağlandı: %s\n", client->id(), client->remoteIP().toString().c_str());
+      cameraClientId = client->id();
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("Camera WebSocket istemci #%u bağlantısı kesildi\n", client->id());
+      cameraClientId = 0;
+      break;
+    case WS_EVT_DATA:
+      break;
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
+    default:
+      break;
+  }
+}
+
+// Görüntü gönderim fonksiyonu (GitHub projesinden - optimize edilmiş)
+void sendCameraPicture() {
+  if (cameraClientId == 0) {
+    return;  // Aktif istemci yok
+  }
+  
+  // Kalite değişikliği kontrolü
+  if (qualityChanged) {
+    qualityChanged = false;
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+      s->set_framesize(s, currentFrameSize);
+      s->set_quality(s, currentJpegQuality);
+      Serial.printf("Kamera kalitesi güncellendi: Size=%d, Quality=%d\n", currentFrameSize, currentJpegQuality);
+      delay(500);
+    }
+  }
+  
+  // Frame yakala
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Frame buffer alınamadı");
+    return;
+  }
+
+  // GitHub projesinden: Direkt client ID ile gönder
+  wsCamera.binary(cameraClientId, fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  
+  // GitHub projesinden: Buffer doluluğunu kontrol et ve bekle
   while (true) {
-    // Kalite değişikliği kontrolü
-    if (qualityChanged) {
-      qualityChanged = false;
-      // Kamera ayarlarını güncelle
-      sensor_t *s = esp_camera_sensor_get();
-      if (s) {
-        s->set_framesize(s, currentFrameSize);
-        s->set_quality(s, currentJpegQuality);
-        Serial.printf("Kamera kalitesi güncellendi: Size=%d, Quality=%d\n", currentFrameSize, currentJpegQuality);
-        delay(500);  // Ayarların uygulanması için bekle
-      }
+    AsyncWebSocketClient * clientPointer = wsCamera.client(cameraClientId);
+    if (!clientPointer || !(clientPointer->queueIsFull())) {
+      break;
     }
-    
-    // Tüm WebSocket istemcilerine görüntü gönder
-    if (ws.count() > 0) {
-      camera_fb_t * fb = esp_camera_fb_get();
-      if (fb) {
-        // Tüm frame'leri gönder (boyut kontrolü kaldırıldı)
-        ws.binaryAll(fb->buf, fb->len);
-        esp_camera_fb_return(fb);
-      }
-    }
-    // 66ms = ~15 FPS - İyi hız/kalite dengesi
-    vTaskDelay(66 / portTICK_PERIOD_MS);
+    delay(1);
   }
 }
 
@@ -829,9 +847,12 @@ void setup() {
     return;
   }
   
-  // WebSocket ayarları
-  ws.onEvent(onWebSocketEvent);
-  server.addHandler(&ws);
+  // WebSocket ayarları - İki ayrı WebSocket (GitHub projesinden)
+  wsCamera.onEvent(onCameraWebSocketEvent);
+  server.addHandler(&wsCamera);
+  
+  wsServoInput.onEvent(onServoInputWebSocketEvent);
+  server.addHandler(&wsServoInput);
   
   // Ana sayfa
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -844,17 +865,13 @@ void setup() {
   Serial.println("✓ WebSocket hazır");
   Serial.println("\nHazır! Tarayıcınızda http://" + WiFi.localIP().toString() + " adresini açın.");
   
-  // Görüntü akışı görevi başlat
-  xTaskCreatePinnedToCore(
-    streamTask,
-    "streamTask",
-    4096,
-    NULL,
-    1,
-    NULL,
-    1  // Core 1'de çalıştır (Core 0 WiFi için)
-  );
-  Serial.println("✓ Görüntü akışı görevi başlatıldı");
+  // PSRAM kontrolü (GitHub projesinden)
+  if (psramFound()) {
+    heap_caps_malloc_extmem_enable(20000);
+    Serial.println("✓ PSRAM bulundu ve etkinleştirildi");
+  }
+  
+  Serial.println("✓ Tüm sistemler hazır");
 }
 
 void loop() {
@@ -865,8 +882,13 @@ void loop() {
     checkWiFiConnection();
   }
   
-  // WebSocket temizliği (bağlantı kopan istemcileri temizle)
-  ws.cleanupClients();
+  // WebSocket temizliği (GitHub projesinden)
+  wsCamera.cleanupClients();
+  wsServoInput.cleanupClients();
   
-  delay(100);
+  // Görüntü gönder (GitHub projesinden - direkt loop'ta)
+  sendCameraPicture();
+  
+  // Kısa delay
+  delay(10);
 }
